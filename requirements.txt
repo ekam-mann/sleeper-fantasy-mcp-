@@ -1,0 +1,7 @@
+# Python 3.10+ required (PEP 604 union syntax).
+mcp>=2.0.0
+httpx>=0.27
+
+# Optional: only for the API-backed mode of news_signals. Not needed for the
+# default keyless path, where the calling model does the extraction.
+# anthropic>=0.40

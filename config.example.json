@@ -1,0 +1,8 @@
+{
+  "username": "your_sleeper_username",
+  "default_league_id": "000000000000000000",
+  "leagues": [
+    { "name": "main",   "league_id": "000000000000000000" },
+    { "name": "second", "league_id": "111111111111111111" }
+  ]
+}
