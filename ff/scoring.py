@@ -17,13 +17,14 @@ FLEX_ELIGIBLE: dict[str, tuple[str, ...]] = {
     "WRRB_FLEX": ("RB", "WR"),
     "REC_FLEX": ("WR", "TE"),
     "SUPER_FLEX": ("QB", "RB", "WR", "TE"),
-    "IDP_FLEX": (),
+    "IDP_FLEX": ("DL", "LB", "DB"),
 }
 
 # How a generic FLEX slot tends to get filled in practice. Used only to place
 # replacement level, so it needs to be roughly right, not exact.
 FLEX_SPLIT = {"RB": 0.45, "WR": 0.45, "TE": 0.10}
 SUPERFLEX_SPLIT = {"QB": 0.7, "RB": 0.1, "WR": 0.15, "TE": 0.05}
+IDP_SPLIT = {"DL": 0.34, "LB": 0.33, "DB": 0.33}
 
 NON_PLAYER_SLOTS = {"BN", "IR", "TAXI"}
 
@@ -47,30 +48,52 @@ def score_stats(stats: dict[str, float], scoring: dict[str, float]) -> float:
     return total
 
 
+def _flex_shares(slot: str) -> dict[str, float]:
+    """How one flex-type slot divides across the positions that can fill it."""
+    if slot == "SUPER_FLEX":
+        return dict(SUPERFLEX_SPLIT)
+
+    eligible = FLEX_ELIGIBLE.get(slot, ())
+    if not eligible:
+        return {}
+
+    # Prefer a configured split for the eligible set; fall back to spreading
+    # evenly so a slot type this code has never seen still contributes.
+    weights = {p: FLEX_SPLIT.get(p, IDP_SPLIT.get(p, 0.0)) for p in eligible}
+    total = sum(weights.values())
+    if total <= 0:
+        return {p: 1.0 / len(eligible) for p in eligible}
+    return {p: w / total for p, w in weights.items()}
+
+
 def starter_counts(roster_positions: list[str], num_teams: int) -> dict[str, float]:
     """League-wide count of startable slots per real position.
 
-    Flex slots are spread across their eligible positions using FLEX_SPLIT, so
-    that a 2-flex league correctly pushes RB/WR replacement level deeper than a
-    0-flex league would.
+    Every position the league actually starts is counted, derived from the
+    roster shape rather than a fixed list. That matters beyond the skill
+    positions: a league starting two defensive linemen, or no kicker at all,
+    has to place replacement level accordingly. Assuming one starter per team
+    for anything outside QB/RB/WR/TE gets both of those wrong.
+
+    Flex slots are spread across the positions eligible to fill them, so a
+    two-flex league correctly pushes RB/WR replacement deeper than a no-flex
+    league would.
     """
-    counts: dict[str, float] = {"QB": 0.0, "RB": 0.0, "WR": 0.0, "TE": 0.0}
+    counts: dict[str, float] = {}
 
     for slot in roster_positions:
-        if slot in NON_PLAYER_SLOTS or slot == "DEF" or slot == "K":
+        if slot in NON_PLAYER_SLOTS:
             continue
-        if slot in counts:
-            counts[slot] += 1
-            continue
-        if slot == "SUPER_FLEX":
-            for pos, share in SUPERFLEX_SPLIT.items():
-                counts[pos] += share
-        elif slot in FLEX_ELIGIBLE:
-            eligible = FLEX_ELIGIBLE[slot]
-            shares = {p: FLEX_SPLIT.get(p, 0.0) for p in eligible}
-            total = sum(shares.values()) or 1.0
+
+        shares = _flex_shares(slot)
+        if shares:
             for pos, share in shares.items():
-                counts[pos] += share / total
+                counts[pos] = counts.get(pos, 0.0) + share
+            continue
+
+        # A plain position slot - QB, RB, K, DEF, DL, LB, DB, or anything else
+        # Sleeper introduces. One slot is one starter for that position.
+        counts[slot] = counts.get(slot, 0.0) + 1
 
     return {pos: n * num_teams for pos, n in counts.items()}
 
@@ -93,11 +116,14 @@ def replacement_levels(
 
     for pos, pts in by_pos.items():
         pts.sort(reverse=True)
-        if pos in baselines:
-            idx = max(0, int(round(baselines[pos])) - 1)
-        else:
-            # DEF/K: one per team, so the last starter is roughly num_teams deep.
-            idx = num_teams - 1
+        # A position the league does not start has no startable slots, so the
+        # baseline sits at the best player available and every one of them
+        # grades at or below zero - which is the correct answer for, say,
+        # kickers in a league with no kicker slot. There is deliberately no
+        # "assume one per team" fallback: that guessed a roster shape instead
+        # of reading it, and was wrong for any league starting zero or two.
+        starters = baselines.get(pos, 0.0)
+        idx = max(0, int(round(starters)) - 1)
         levels[pos] = pts[min(idx, len(pts) - 1)] if pts else 0.0
 
     return levels

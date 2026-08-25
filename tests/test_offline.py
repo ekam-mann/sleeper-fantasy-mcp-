@@ -72,6 +72,49 @@ def test_superflex_creates_qb_demand():
     assert superflex["QB"] > one_qb["QB"]
 
 
+def test_every_started_position_is_counted_not_just_skill_positions():
+    """K, DEF and IDP slots are real starters, not an afterthought."""
+    counts = scoring.starter_counts(
+        ["QB", "RB", "WR", "TE", "K", "DEF", "DL", "LB", "DB", "BN"], 12
+    )
+    for pos in ("K", "DEF", "DL", "LB", "DB"):
+        assert counts.get(pos) == 12
+
+
+def test_position_count_scales_with_slots():
+    one = scoring.starter_counts(["QB", "K", "DEF"], 10)
+    two = scoring.starter_counts(["QB", "K", "K", "DEF"], 10)
+    assert one["K"] == 10
+    assert two["K"] == 20
+
+
+def test_position_the_league_never_starts_has_no_slots():
+    counts = scoring.starter_counts(["QB", "RB", "WR", "TE", "DEF"], 12)
+    assert "K" not in counts
+
+
+def test_unstarted_position_grades_at_or_below_zero():
+    """A kicker cannot have positive value in a league with no kicker slot.
+
+    The old code assumed one starter per team for anything outside QB/RB/WR/TE,
+    so kickers kept a positive baseline in leagues that never start one.
+    """
+    kickers = [{"position": "K", "points": float(p)} for p in (150, 140, 130, 120)]
+    levels = scoring.replacement_levels(kickers, ["QB", "RB", "WR", "TE"], 12)
+    assert levels["K"] == 150  # the best one is the baseline
+    assert all(k["points"] - levels["K"] <= 0 for k in kickers)
+
+
+def test_idp_flex_distributes_across_defensive_positions():
+    counts = scoring.starter_counts(["QB", "IDP_FLEX", "IDP_FLEX"], 10)
+    assert sum(counts.get(p, 0) for p in ("DL", "LB", "DB")) == pytest.approx(20.0)
+
+
+def test_unknown_slot_types_still_count_as_starters():
+    counts = scoring.starter_counts(["QB", "P", "FB"], 8)
+    assert counts["P"] == 8 and counts["FB"] == 8
+
+
 # ------------------------------------------------------------------ draftplan
 
 
