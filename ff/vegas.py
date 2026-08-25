@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import httpx
 
+from . import sleeper
+
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 
 TEAM_FIXUPS = {"WSH": "WAS"}
@@ -45,12 +47,26 @@ def _pick_line(odds: list[dict]) -> dict | None:
     return None
 
 
+# Lines move over a week, but not second to second. Fifteen minutes keeps the
+# numbers current for any lineup decision while stopping every tool call from
+# making its own live request - this was previously uncached, so a single
+# player lookup paid a full ESPN round trip.
+ODDS_TTL = 15 * 60
+
+
 def week_odds(season: str, week: int) -> list[dict]:
     """Spread, total, and implied team totals for each game in a week."""
-    with httpx.Client(timeout=25.0, follow_redirects=True) as client:
-        resp = client.get(ESPN, params={"dates": season, "seasontype": 2, "week": week})
-        resp.raise_for_status()
-        data = resp.json()
+    url = f"{ESPN}?dates={season}&seasontype=2&week={week}"
+    try:
+        data = sleeper._get(url, f"odds_{season}_wk{week}", ODDS_TTL)
+    except Exception:
+        # Never let a caching problem take out the odds entirely.
+        with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+            resp = client.get(
+                ESPN, params={"dates": season, "seasontype": 2, "week": week}
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
     games: list[dict] = []
     for event in data.get("events", []):

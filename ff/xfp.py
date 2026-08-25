@@ -25,8 +25,8 @@ some generic one.
 
 from __future__ import annotations
 
+from . import memo, sleeper
 from . import scoring as scoring_mod
-from . import sleeper
 
 POSITIONS = ["QB", "RB", "WR", "TE"]
 
@@ -143,6 +143,7 @@ def _fit_nonnegative(
     return [0.0] * k
 
 
+@memo.table
 def fit_weights(
     season: str, scoring: dict[str, float]
 ) -> dict[str, dict]:
@@ -180,6 +181,7 @@ def fit_weights(
     return out
 
 
+@memo.table
 def xfp_table(season: str, scoring: dict[str, float]) -> dict[str, dict]:
     """Expected vs actual fantasy points for every player, league-scored."""
     fitted = fit_weights(season, scoring)

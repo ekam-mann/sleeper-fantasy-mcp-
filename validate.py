@@ -18,6 +18,7 @@ from ff import (
     availability,
     context,
     draftplan,
+    form,
     handcuffs,
     keepers,
     montecarlo,
@@ -491,15 +492,17 @@ def main() -> None:
           f"top={mixed[0]['player']}")
 
     cheap = next(r for r in m_rows if r.get("adp") and 90 < r["adp"] < 140)
-    prior = {top["player_id"]: 1, cheap["player_id"]: 12}
+    # Named distinctly: `prior` already holds the prior SEASON at this point,
+    # and rebinding it here silently fed a dict to every later season lookup.
+    keeper_costs = {top["player_id"]: 1, cheap["player_id"]: 12}
     res = keepers.analyse([top, cheap], m_rows, m_lg, slot=k_slot,
-                          prior_rounds=prior, draft_rounds=dl)
+                          prior_rounds=keeper_costs, draft_rounds=dl)
     check("an escalating cost rule never raises surplus",
           all(a["surplus"] >= b["surplus"] for a, b in zip(
               sorted(res, key=lambda x: x["player"]),
               sorted(keepers.analyse([top, cheap], m_rows, m_lg, slot=k_slot,
                                      cost_rule="two_rounds_earlier",
-                                     prior_rounds=prior, draft_rounds=dl),
+                                     prior_rounds=keeper_costs, draft_rounds=dl),
                      key=lambda x: x["player"]))))
     check("unknown cost yields no surplus rather than a guess",
           keepers.analyse([top], m_rows, m_lg, slot=k_slot, prior_rounds={},
@@ -531,6 +534,42 @@ def main() -> None:
     ok_flag, _ = news.available()
     check("news layer degrades without a key rather than erroring",
           isinstance(ok_flag, bool))
+
+    # --------------------------------------------------------- Recent form
+    section("Recent form")
+    fm = form.form_table(prior, m_sc, window=4)
+    check("form table is non-empty", len(fm) > 50, f"{len(fm)} players")
+    check("windows never exceed the requested size",
+          all(f["recent"]["games"] <= 4 and f["prior"]["games"] <= 4
+              for f in fm.values()))
+    check("recent window is strictly later than the prior window",
+          all(min(f["recent"]["weeks"]) > max(f["prior"]["weeks"])
+              for f in fm.values()))
+    check("windows never overlap",
+          all(not (set(f["recent"]["weeks"]) & set(f["prior"]["weeks"]))
+              for f in fm.values()))
+    check("shares stay within 0-100",
+          all(0 <= (f["recent"].get(k) or 0) <= 100.5
+              for f in fm.values()
+              for k in ("snap_share", "target_share", "carry_share")))
+    # The team-attribution bug: player.team is the CURRENT club, so free agents
+    # and mid-season movers lost their shares entirely.
+    lost = [f for f in fm.values()
+            if f["recent"]["target_share"] is None
+            and f["recent"]["carry_share"] is None]
+    check("no player loses both share metrics to team attribution", not lost,
+          f"{len(lost)} players")
+    check("deltas equal recent minus prior",
+          all(abs(f["delta"]["ppg"] - (f["recent"]["ppg"] - f["prior"]["ppg"])) < 0.01
+              for f in fm.values()))
+    check("trend score ignores points",
+          form.opportunity_trend_score(
+              {"delta": {"snap_share": 0.0, "target_share": 0.0,
+                         "carry_share": 0.0, "rz_looks_per_game": 0.0,
+                         "ppg": 99.0}}) == 0.0)
+    shortened = [f for f in fm.values() if f["recent"]["shortened_weeks"]]
+    check("shortened games are detected and reported", len(shortened) > 0,
+          f"{len(shortened)} players flagged")
 
     # ------------------------------------------------------------- Watch
     section("Settings watchdog")

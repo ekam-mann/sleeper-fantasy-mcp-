@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import statistics
 
+from . import memo, sleeper
 from . import scoring as scoring_mod
-from . import sleeper
 
 POSITIONS = ["QB", "RB", "WR", "TE"]
 
@@ -89,6 +89,7 @@ def _thresholds(
     return out
 
 
+@memo.table
 def volatility_table(
     season: str,
     scoring: dict[str, float] | None = None,

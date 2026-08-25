@@ -11,7 +11,7 @@ outscores an efficient one with 6.
 
 from __future__ import annotations
 
-from . import sleeper
+from . import memo, sleeper
 
 POSITIONS = ["QB", "RB", "WR", "TE"]
 
@@ -56,6 +56,7 @@ def _safe_div(a: float | None, b: float | None) -> float | None:
     return a / b
 
 
+@memo.table
 def usage_table(season: str) -> dict[str, dict]:
     """Per-player opportunity metrics for a completed season.
 
@@ -71,7 +72,11 @@ def usage_table(season: str) -> dict[str, dict]:
     team_rec_yd: dict[str, float] = {}
     team_rec_td: dict[str, float] = {}
     for r in rows:
-        team = (r.get("player") or {}).get("team")
+        # Prefer the row-level team (the club he actually played for) over
+        # `player.team`, which is his *current* roster team - null for free
+        # agents and wrong for anyone who moved. Neither field is complete on
+        # the season endpoint, so fall back rather than drop the row.
+        team = r.get("team") or (r.get("player") or {}).get("team")
         s = r.get("stats") or {}
         if not team:
             continue

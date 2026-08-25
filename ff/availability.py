@@ -19,7 +19,7 @@ than assumes.
 
 from __future__ import annotations
 
-from . import sleeper
+from . import memo, sleeper
 
 POSITIONS = ["QB", "RB", "WR", "TE"]
 
@@ -55,6 +55,7 @@ def _season_gp(season: str) -> dict[str, dict]:
     return out
 
 
+@memo.table
 def availability_table(seasons: list[str]) -> dict[str, dict]:
     """Multi-season availability per player.
 

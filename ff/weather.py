@@ -74,10 +74,38 @@ STADIUMS: dict[str, tuple[float, float, str]] = {
 }
 
 
+# ESPN is not consistent about venue names - it serves current names, former
+# names, and sponsor-free short forms interchangeably across weeks. An
+# unrecognised name silently drops that game from the forecast, so known
+# variants map onto the canonical key rather than being missed.
+VENUE_ALIASES = {
+    "reliant stadium": "nrg stadium",
+    "arrowhead stadium": "geha field at arrowhead stadium",
+    "mercedes-benz superdome": "caesars superdome",
+    "superdome": "caesars superdome",
+    "fedexfield": "northwest stadium",
+    "commanders field": "northwest stadium",
+    "heinz field": "acrisure stadium",
+    "firstenergy stadium": "huntington bank field",
+    "cleveland browns stadium": "huntington bank field",
+    "tiaa bank field": "everbank stadium",
+    "jacksonville municipal stadium": "everbank stadium",
+    "new era field": "highmark stadium",
+    "ralph wilson stadium": "highmark stadium",
+    "nissan stadium at the east bank": "nissan stadium",
+    "sports authority field at mile high": "empower field at mile high",
+    "univision stadium": "estadio banorte",
+    "estadio azteca": "estadio banorte",
+    "allianz arena": "fc bayern munich stadium",
+    "santiago bernabeu stadium": "santiago bernabeu",
+}
+
+
 def _norm(name: str) -> str:
     """Accent- and case-insensitive key (Maracana, Bernabeu)."""
     s = unicodedata.normalize("NFKD", name or "")
-    return "".join(c for c in s if not unicodedata.combining(c)).strip().lower()
+    key = "".join(c for c in s if not unicodedata.combining(c)).strip().lower()
+    return VENUE_ALIASES.get(key, key)
 
 
 def games(season: str, week: int) -> list[dict]:

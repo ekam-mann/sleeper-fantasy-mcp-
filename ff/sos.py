@@ -22,8 +22,8 @@ from pathlib import Path
 
 import httpx
 
+from . import memo, sleeper
 from . import scoring as scoring_mod
-from . import sleeper
 
 ESPN = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
@@ -53,6 +53,7 @@ def _scoring_key(scoring: dict[str, float] | None) -> str:
     return hashlib.sha1(blob).hexdigest()[:10]
 
 
+@memo.table
 def points_allowed(
     season: str, scoring: dict[str, float] | None = None
 ) -> dict[str, dict[str, float]]:
@@ -113,6 +114,7 @@ def points_allowed(
     return per_game
 
 
+@memo.table
 def defense_ranks(
     season: str, scoring: dict[str, float] | None = None
 ) -> dict[str, dict[str, int]]:

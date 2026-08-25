@@ -466,3 +466,82 @@ def test_need_tilt_never_flips_sign_on_negative_value():
         assert analysis.apply_need(0.0, urgency) == 0.0
     assert analysis.apply_need(60.0, "critical") > 60.0
     assert analysis.apply_need(60.0, "surplus") < 60.0
+
+
+DEF_ROSTER = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "DEF", "BN", "BN", "BN"]
+
+
+def test_backup_defence_is_worth_far_less_than_a_backup_rb():
+    """A team defence never misses a game, so a second one is near-worthless.
+
+    A flat bench share floored DEF2 high enough to outrank real players, which
+    made a full-draft sim take five of them.
+    """
+    assert analysis.bench_share("DEF") < analysis.bench_share("RB") / 3
+    assert analysis.bench_share("K") == analysis.bench_share("DEF")
+
+
+def test_qb_carries_the_highest_bench_share():
+    """Benchings count: a benched starter plays the backup just as injury does."""
+    assert analysis.bench_share("QB") == max(analysis.BENCH_SHARE_BY_POS.values())
+
+
+def test_unknown_position_falls_back_rather_than_zeroing():
+    assert analysis.bench_share("LB") == analysis.BENCH_SHARE_DEFAULT
+    assert analysis.bench_share(None) == analysis.BENCH_SHARE_DEFAULT
+
+
+def test_second_defence_does_not_outrank_a_startable_player():
+    owned = _filled_roster() + [_p("D1", "DEF", 120, 19.0)]
+    d2 = analysis.effective_value(_p("D2", "DEF", 117, 17.0), owned, DEF_ROSTER)
+    rb = analysis.effective_value(_p("RB9", "RB", 150, 25.0), owned, DEF_ROSTER)
+    assert rb["effective_value"] > d2["effective_value"]
+
+
+def test_form_windows_are_always_equal_length():
+    """Unequal halves make the prior side noisier and every delta unstable."""
+    for total in range(4, 20):
+        games = list(range(total))
+        eff = min(4, len(games) // 2)
+        recent, prior = games[-eff:], games[-2 * eff : -eff]
+        assert len(recent) == len(prior), total
+        assert not set(recent) & set(prior), total
+        assert eff <= 4
+
+
+def test_unstartable_position_is_never_recommended():
+    """A FB cannot fill any slot in a RB/WR/TE flex league, so he is not a pick."""
+    avail = [_p("FB1", "FB", 90, 0.0), _p("WRz", "WR", 150, -20.0)]
+    recs = analysis.draft_recommendations(avail, _filled_roster(), ONE_TE_ROSTER, 12, 150)
+    assert all(r["position"] != "FB" for r in recs)
+
+
+def test_streamable_positions_are_capped_at_what_you_start():
+    """Only ~12 defences are drafted, so DEF keeps positive VOR after every
+    skill position is exhausted - and would otherwise win every late pick."""
+    owned = _filled_roster() + [_p("D1", "DEF", 120, 19.0)]
+    avail = [_p("D2", "DEF", 117, 17.0), _p("WRz", "WR", 150, -20.0)]
+    recs = analysis.draft_recommendations(avail, owned, DEF_ROSTER, 12, 150)
+    assert all(r["position"] != "DEF" for r in recs)
+
+
+def test_below_replacement_ranks_on_depth_not_vor_magnitude():
+    """TE replacement is shallow, so a late TE's VOR looks better than a WR's
+    for reasons that have nothing to do with either being playable."""
+    owned = _filled_roster() + [_p("TEb", "TE", 150, 30.0)]
+    te = analysis.effective_value(_p("TEz", "TE", 140, -5.0), owned, ONE_TE_ROSTER)
+    wr = analysis.effective_value(_p("WRz", "WR", 130, -25.0), owned, ONE_TE_ROSTER)
+    assert te["vor"] > wr["vor"], "precondition: raw VOR prefers the TE"
+    assert wr["effective_value"] > te["effective_value"]
+
+
+def test_below_replacement_players_do_not_all_tie_at_zero():
+    """max(marginal, -surplus) would return 0.0 for every bench player."""
+    owned = _filled_roster() + [_p("TEb", "TE", 150, 30.0)]
+    scores = {
+        pos: analysis.effective_value(_p("x", pos, 100, -10.0), owned, ONE_TE_ROSTER)[
+            "effective_value"
+        ]
+        for pos in ("TE", "WR", "RB")
+    }
+    assert len(set(scores.values())) > 1, scores

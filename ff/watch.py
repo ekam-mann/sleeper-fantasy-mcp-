@@ -21,6 +21,7 @@ Two deliberate design choices:
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -49,10 +50,41 @@ WATCHED_SETTINGS = [
 ]
 
 
+# A watchdog that blocks the answer is worse than one that occasionally cannot
+# verify. This runs on every single command, so a slow or flaky API must cost a
+# couple of seconds and a caveat - never the whole call. Measured against a
+# degraded network where Sleeper took 40s a request while ESPN took 1.7s.
+FETCH_TIMEOUT = 3.0
+
+# How long a clean verification stays good for.
+#
+# League settings are changed by a commissioner in a web UI - a rare, manual,
+# deliberate act - not something that drifts on its own. Re-reading them twice
+# per function call priced a constant tax against an event that happens maybe
+# once a season, so this is deliberately long.
+#
+# The cost of the window is bounded and known: a settings change made mid-session
+# can go unreported for up to this long. Two escape hatches keep that acceptable
+# - `settings_check` forces a real read on demand, and `refresh_data` resets the
+# window, so any explicit "re-read the world" gesture gets fresh settings.
+#
+# Only a CLEAN result is allowed to satisfy the window. If drift was found, the
+# alert must keep surfacing until something acknowledges it, so a dirty result
+# always forces a real re-read.
+GRACE_SECONDS = 30 * 60.0
+
+_LAST: dict[str, object] = {"at": 0.0, "clean": False}
+
+
 def _fetch_league(league_id: str) -> dict | None:
-    """Fresh league read, deliberately uncached."""
+    """Fresh league read, deliberately uncached.
+
+    Returns None on timeout, which the caller reports as "unverified" rather
+    than treating as "unchanged" - failing open on latency, but never silently
+    claiming the settings were checked when they were not.
+    """
     try:
-        resp = httpx.get(f"{BASE}/league/{league_id}", timeout=10.0)
+        resp = httpx.get(f"{BASE}/league/{league_id}", timeout=FETCH_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
     except Exception:
@@ -131,12 +163,21 @@ def _diff(old: Any, new: Any, path: str = "") -> list[str]:
     return changes
 
 
-def check(acknowledge: bool = False) -> dict | None:
+def check(acknowledge: bool = False, force: bool = False) -> dict | None:
     """Re-read every configured league and report any settings drift.
 
     Returns None when nothing changed. Pass acknowledge=True once the result
-    has actually been surfaced, to advance the stored baseline.
+    has actually been surfaced, to advance the stored baseline. Pass force=True
+    to bypass the grace window and always hit the network.
     """
+    now = time.monotonic()
+    if (
+        not force
+        and _LAST["clean"]
+        and (now - float(_LAST["at"])) < GRACE_SECONDS  # type: ignore[arg-type]
+    ):
+        return None
+
     try:
         cfg = context.load_config()
     except Exception:
@@ -181,7 +222,14 @@ def check(acknowledge: bool = False) -> dict | None:
             _save_state(merged)
 
     if not alerts and not unreachable:
+        # Fully verified and unchanged - this is the only outcome the grace
+        # window may serve. An unreachable league is NOT clean: it means we did
+        # not actually verify, so the next call must try again rather than
+        # inheriting a silence it never earned.
+        _LAST["at"], _LAST["clean"] = now, True
         return None
+
+    _LAST["at"], _LAST["clean"] = now, False
 
     result: dict = {}
     if alerts:
@@ -196,6 +244,16 @@ def check(acknowledge: bool = False) -> dict | None:
             f"Could not reach Sleeper to verify: {', '.join(unreachable)}"
         )
     return result
+
+
+def invalidate() -> None:
+    """Drop the grace window so the next check does a real read.
+
+    Called by refresh_data: if someone explicitly asks to re-read everything,
+    serving them a settings verdict cached from half an hour ago is exactly
+    the wrong answer.
+    """
+    _LAST["at"], _LAST["clean"] = 0.0, False
 
 
 def status() -> dict:

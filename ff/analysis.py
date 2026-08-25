@@ -44,10 +44,46 @@ def roster_needs(
     return out
 
 
-# What a player who cannot crack your starting lineup is still worth: bye
-# weeks, injuries, and the chance he outgrows the man ahead of him. Small, but
-# not zero - a backup is not literally worthless.
-BENCH_SHARE = 0.25
+# What a player who cannot crack your starting lineup is still worth: the weeks
+# the man ahead of him misses, plus his bye. That is not one number - it is
+# strongly positional, and a flat constant gets defences badly wrong.
+#
+# Derived from this repo's own availability table (2023-2025, players with a
+# 100+ point season, so the sample is starters rather than deep reserves):
+#
+#     pos   games missed/season   (missed + 1 bye) / 17
+#     QB           5.53                   0.38
+#     RB           2.86                   0.23
+#     WR           3.00                   0.24
+#     TE           2.48                   0.20
+#
+# QB is highest because the number counts benchings, not just injuries - and a
+# benched starter puts the backup in your lineup exactly as an injured one does,
+# so it belongs here.
+#
+# Refresh with: availability.position_base_rates(availability.availability_table(...))
+BENCH_SHARE_BY_POS = {
+    "QB": 0.38,
+    "RB": 0.23,
+    "WR": 0.24,
+    "TE": 0.20,
+    # A team defence and a kicker never miss a game - there is always one on the
+    # field - so the only week you need a second is the bye, and even that is
+    # streamable off waivers. Measured durability does not apply; the honest
+    # value of a backup here is the bye week and nothing more.
+    "DEF": 1 / 17,
+    "K": 1 / 17,
+}
+
+# Positions with no measured durability (IDP, or anything Sleeper adds later).
+# Set to the all-position average so an unknown position behaves sensibly
+# rather than being silently valued at zero.
+BENCH_SHARE_DEFAULT = 0.24
+
+
+def bench_share(position: str | None) -> float:
+    """Fraction of a season a backup at this position can expect to start."""
+    return BENCH_SHARE_BY_POS.get(position or "", BENCH_SHARE_DEFAULT)
 
 
 def starting_value(players: list[dict], roster_positions: list[str]) -> float:
@@ -110,6 +146,31 @@ def marginal_value(
     )
 
 
+# Positions where a startable player is always available on waivers, so you
+# stream them week to week instead of rostering depth.
+#
+# These need a hard cap, not just a small bench share. Only about as many
+# defences are drafted as there are teams, while roughly three times as many
+# receivers clear replacement - so once a draft passes its twelfth round every
+# skill position has gone below replacement and DEF is the *only* position with
+# positive VOR left on the board. Any bench value above zero then wins by
+# default, and a full mock draft from 1.1 took four defences.
+#
+# Value over replacement is measured against the last *startable* player league
+# wide, which is the right denominator for a starter and the wrong one for a
+# backup you would never play: the true alternative to a second defence is not
+# the 13th-best defence, it is whichever one is free on waivers that week -
+# which is roughly as good. So the surplus is not small, it is zero.
+STREAMABLE_POSITIONS = ("DEF", "K")
+
+
+def roster_cap(position: str | None, roster_positions: list[str]) -> float | None:
+    """Most of this position worth rostering, or None if uncapped."""
+    if position not in STREAMABLE_POSITIONS:
+        return None
+    return scoring.starter_counts(roster_positions, 1).get(position, 0.0)
+
+
 def _depth_discount(
     candidate: dict, owned: list[dict], roster_positions: list[str]
 ) -> float:
@@ -124,12 +185,18 @@ def _depth_discount(
     above a receiver, since a flat share of VOR preserves the very ordering the
     lineup check was meant to correct.
     """
+    return 1.0 / (1.0 + _position_surplus(candidate, owned, roster_positions))
+
+
+def _position_surplus(
+    candidate: dict, owned: list[dict], roster_positions: list[str]
+) -> float:
+    """How many bodies deep past startable this position already is."""
     pos = candidate.get("position")
     ahead = sum(1 for o in owned if o.get("position") == pos)
     # Startable slots for this position on a single roster, flex share included.
     per_team = scoring.starter_counts(roster_positions, 1).get(pos, 0.0)
-    surplus = max(0.0, ahead - per_team)
-    return 1.0 / (1.0 + surplus)
+    return max(0.0, ahead - per_team)
 
 
 def effective_value(
@@ -146,9 +213,37 @@ def effective_value(
     marginal = marginal_value(candidate, owned, roster_positions)
     # max(0, vor) matters: a below-replacement player must not earn a *floor*
     # from a negative number.
-    discount = _depth_discount(candidate, owned, roster_positions)
-    bench_floor = BENCH_SHARE * max(0.0, vor) * discount
-    score = max(marginal, bench_floor)
+    surplus = _position_surplus(candidate, owned, roster_positions)
+    discount = 1.0 / (1.0 + surplus)
+    bench_floor = bench_share(candidate.get("position")) * max(0.0, vor) * discount
+
+    if vor > 0:
+        score = max(marginal, bench_floor)
+    else:
+        # Below replacement the bench floor is zero for everyone, so every such
+        # player ties at exactly 0.0 and the ranking among them is decided by
+        # list order - which is no ranking at all. In the last rounds, when the
+        # whole board is below replacement, that tie is the entire decision, and
+        # it fell to tight ends: TE replacement level is shallow, so a late TE
+        # scores a mildly negative VOR where an equally unplayable receiver
+        # scores a deeply negative one.
+        #
+        # Ranking them by VOR does not work either. How far below replacement a
+        # player sits is not decision-relevant once he is below it at all - he
+        # will not start either way - but the magnitudes differ wildly by
+        # position, because replacement level sits at a different depth for
+        # each. A late TE grades around -5 where an equally unplayable WR
+        # grades around -25, purely because only ~12 TEs clear replacement
+        # against ~35 WRs. Sorting on that number is sorting on positional
+        # scarcity of the *starting* pool, and it fills the last rounds with
+        # tight ends.
+        #
+        # What is decision-relevant is where you are thinnest, so rank on
+        # depth alone and let raw VOR break ties within a position.
+        # NOT max(marginal, -surplus): marginal is 0.0 for every bench player,
+        # so the max would return 0.0 every time and restore the very tie this
+        # branch exists to break.
+        score = marginal if marginal > 0 else -surplus
 
     pos = candidate.get("position")
     ahead = sum(1 for o in owned if o.get("position") == pos)
@@ -163,7 +258,10 @@ def effective_value(
             f"depth value discounted to {discount:.0%}"
         )
     elif vor > 0:
-        why = f"cannot crack your lineup (adds {marginal:.1f}) - valued as depth"
+        why = (
+            f"cannot crack your lineup (adds {marginal:.1f}) - valued as depth "
+            f"at {bench_share(pos):.0%} of his VOR"
+        )
     else:
         why = "below replacement at his position"
 
@@ -221,8 +319,32 @@ def draft_recommendations(
     """
     needs = roster_needs(owned, roster_positions, num_teams)
 
+    held: dict[str, int] = {}
+    for o in owned:
+        held[o["position"]] = held.get(o["position"], 0) + 1
+
+    # Which positions this league can start at all, flex eligibility included.
+    startable = scoring.starter_counts(roster_positions, 1)
+
     scored: list[dict] = []
     for p in available:
+        # A position with no slot and no flex that accepts it can never enter a
+        # lineup, so it is not a worse pick - it is not a pick. Sleeper's player
+        # pool carries positions most leagues never start (FB is the common one,
+        # and kickers in a league with no K slot), and they surface at exactly
+        # the wrong moment: they grade at a VOR of 0 rather than negative,
+        # because replacement level for an unstartable position is its best
+        # player. In the last rounds, when every startable player has gone below
+        # replacement, that 0 is the highest number left and a mock draft from
+        # 1.1 duly took two fullbacks.
+        if startable.get(p["position"], 0.0) <= 0:
+            continue
+
+        # Never recommend depth at a position you would stream instead.
+        cap = roster_cap(p["position"], roster_positions)
+        if cap is not None and held.get(p["position"], 0) >= cap:
+            continue
+
         urgency = needs.get(p["position"], {}).get("urgency", "adequate")
         # Rank on what he adds to *this* roster, not on raw VOR. The need tilt
         # then breaks ties among players who help a similar amount.
@@ -275,7 +397,9 @@ def draft_recommendations(
             }
         )
 
-    scored.sort(key=lambda r: r["adjusted_value"], reverse=True)
+    # VOR is the secondary key: below replacement every candidate is scored on
+    # depth alone, so this decides between players at equally thin positions.
+    scored.sort(key=lambda r: (r["adjusted_value"], r.get("vor") or 0.0), reverse=True)
     return scored[:limit]
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 
+import httpx
 from mcp.server import MCPServer
 
 from ff import (
@@ -18,10 +19,13 @@ from ff import (
     construction,
     context,
     draftplan,
+    form,
     handcuffs,
     keepers,
+    memo,
     montecarlo,
     news,
+    prewarm,
     schedule,
     scoring,
     sleeper,
@@ -79,7 +83,21 @@ def _checked(fn):
 
     @functools.wraps(fn)
     def inner(*args, **kwargs):
-        result = fn(*args, **kwargs)
+        try:
+            result = fn(*args, **kwargs)
+        except httpx.HTTPStatusError as e:
+            # Almost always a league id that does not exist. The client asked a
+            # reasonable question about an unreasonable league - say so, rather
+            # than surfacing a transport exception.
+            code = e.response.status_code
+            if code in (400, 404):
+                return {
+                    "error": (
+                        "Sleeper has no such league (HTTP "
+                        f"{code}). Check the league_id in config.json."
+                    )
+                }
+            return {"error": f"Sleeper returned HTTP {code}."}
         try:
             alert = watch.check()
         except Exception:
@@ -106,6 +124,17 @@ def tool(*d_args, **d_kwargs):
         return register(_checked(fn))
 
     return decorate
+
+
+# Warm the derived tables while the process is otherwise idle, so the first
+# real question does not pay to build them. Failures are silent by design.
+try:
+    prewarm.start(
+        [e["league_id"] for e in (context.load_config().get("leagues") or [])
+         if e.get("league_id")]
+    )
+except Exception:
+    pass
 
 
 # --- league basics --------------------------------------------------------
@@ -193,7 +222,7 @@ def league_info(league_id: str | None = None) -> dict:
 
 
 @tool()
-def standings(league_id: str | None = None) -> list[dict]:
+def standings(league_id: str | None = None) -> list[dict] | dict:
     """Current standings with record, points for/against, and FAAB left."""
     lid = context.resolve_league_id(league_id)
     users = {u["user_id"]: u for u in sleeper.league_users(lid)}
@@ -762,6 +791,14 @@ def player(name: str, league_id: str | None = None, week: int | None = None) -> 
     except Exception:
         matchups = None
 
+    # Is the role growing or shrinking, independent of the points?
+    try:
+        form_rec = form.form_table(prior, lg.get("scoring_settings")).get(
+            p["player_id"]
+        )
+    except Exception:
+        form_rec = None
+
     # Two players with the same projection can be very different assets.
     try:
         vol = volatility.volatility_table(
@@ -806,6 +843,8 @@ def player(name: str, league_id: str | None = None, week: int | None = None) -> 
         "game_environment": _game_env(p.get("team"), season, week),
         "expected_points": xfp_rec,
         "regression_read": xfp.regression_read(xfp_rec),
+        "recent_form": form_rec,
+        "form_read": form.form_read(form_rec, p["position"]),
         "consistency": vol,
         "consistency_read": volatility.consistency_read(vol, p["position"]),
         "format_fit": volatility.format_fit(vol),
@@ -1656,6 +1695,85 @@ def keeper_analysis(
 
 
 @tool()
+def recent_form(
+    league_id: str | None = None,
+    position: str | None = None,
+    direction: str = "rising",
+    window: int = 4,
+    season: str | None = None,
+    min_opportunities: float = 6.0,
+    limit: int = 12,
+) -> dict:
+    """Whose ROLE is growing or shrinking, from the last N games he played.
+
+    Ranked on opportunity (snaps, targets, carries, red-zone looks), not on
+    points. Production trend is dominated by touchdown luck and regresses;
+    opportunity is sticky, so it is the part worth acting on. Points are still
+    reported, flagged when they moved without the usage behind them.
+
+    direction = rising | falling | both
+    """
+    lid = context.resolve_league_id(league_id)
+    lg, rows = context.league_values(lid)
+    szn = season or str(
+        int(lg.get("season") or sleeper.nfl_state()["season"]) - 1
+    )
+
+    try:
+        table = form.form_table(szn, lg.get("scoring_settings"), window)
+    except Exception as e:
+        return {"error": f"Could not build the form table: {e}"}
+
+    idx = context.index_by_id(rows)
+    merged = []
+    for pid, rec in table.items():
+        row = idx.get(pid)
+        if not row:
+            continue
+        if position and row["position"] != position.upper():
+            continue
+        # A trend off a near-zero base is arithmetic, not information.
+        if (rec["recent"]["opportunities_per_game"] or 0) < min_opportunities:
+            continue
+        score = form.opportunity_trend_score(rec)
+        if score is None:
+            continue
+        merged.append(
+            {
+                "name": row["name"],
+                "position": row["position"],
+                "team": row.get("team"),
+                "projected_points": row.get("points"),
+                "adp": row.get("adp"),
+                "opportunity_trend": score,
+                "recent_weeks": rec["recent"]["weeks"],
+                "shortened_weeks": rec["recent"]["shortened_weeks"],
+                "snap_share": rec["recent"]["snap_share"],
+                "opportunities_per_game": rec["recent"]["opportunities_per_game"],
+                "delta": rec["delta"],
+                "read": form.form_read(rec, row["position"]),
+            }
+        )
+
+    merged.sort(key=lambda x: x["opportunity_trend"], reverse=True)
+    out = {
+        "league": lg.get("name"),
+        "season": szn,
+        "window_games": window,
+        "note": (
+            "Windows are the last N games actually PLAYED, compared against the "
+            "previous N played - not calendar weeks, so a missed game does not "
+            "read as a lost role. Ranked by opportunity, not points."
+        ),
+    }
+    if direction in ("rising", "both"):
+        out["role_growing"] = merged[:limit]
+    if direction in ("falling", "both"):
+        out["role_shrinking"] = merged[-limit:][::-1]
+    return out
+
+
+@tool()
 def vegas_lines(week: int | None = None, season: str | None = None) -> dict:
     """Betting lines and the game scripts they imply, ranked by scoring environment.
 
@@ -1672,7 +1790,9 @@ def vegas_lines(week: int | None = None, season: str | None = None) -> dict:
 
 
 @tool()
-def trending_players(kind: str = "add", hours: int = 24, limit: int = 20) -> list[dict]:
+def trending_players(
+    kind: str = "add", hours: int = 24, limit: int = 20
+) -> list[dict] | dict:
     """Who the whole Sleeper userbase is adding or dropping. kind = add | drop."""
     data = sleeper.trending(kind, hours, limit)
     players = sleeper.all_players()
@@ -1695,7 +1815,13 @@ def trending_players(kind: str = "add", hours: int = 24, limit: int = 20) -> lis
 def refresh_data() -> dict:
     """Clear the local cache. Use after a trade, a waiver run, or mid-draft."""
     n = sleeper.clear_cache()
-    return {"cleared_files": n, "note": "next call refetches from Sleeper"}
+    # The disk cache and the in-process memo must be dropped together;
+    # otherwise the next call rebuilds nothing and serves stale tables.
+    memoised = memo.clear()
+    # An explicit refresh must also drop the settings grace window.
+    watch.invalidate()
+    return {
+        "memoised_tables_dropped": memoised,"cleared_files": n, "note": "next call refetches from Sleeper"}
 
 
 if __name__ == "__main__":
@@ -1711,7 +1837,11 @@ def settings_check() -> dict:
     """
     return {
         "leagues": watch.status(),
-        "drift": watch.check(acknowledge=True) or "no changes since last check",
+        # Explicitly asking for a settings check must never be answered from
+        # the grace window - that is the one call where a real read is the
+        # whole point.
+        "drift": watch.check(acknowledge=True, force=True)
+        or "no changes since last check",
         "watching": (
             "scoring_settings, roster_positions, total_rosters, and the settings "
             "that affect value: waiver type/budget, trade deadline, playoff "

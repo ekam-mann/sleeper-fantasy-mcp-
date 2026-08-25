@@ -12,6 +12,10 @@ from . import schedule, scoring, sleeper
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
 
+class LeagueNotFound(Exception):
+    """The league id does not exist, or Sleeper will not serve it."""
+
+
 def load_config() -> dict:
     if CONFIG_PATH.exists():
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
