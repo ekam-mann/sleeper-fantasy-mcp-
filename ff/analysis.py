@@ -44,6 +44,139 @@ def roster_needs(
     return out
 
 
+# What a player who cannot crack your starting lineup is still worth: bye
+# weeks, injuries, and the chance he outgrows the man ahead of him. Small, but
+# not zero - a backup is not literally worthless.
+BENCH_SHARE = 0.25
+
+
+def starting_value(players: list[dict], roster_positions: list[str]) -> float:
+    """Projected points of the best legal starting lineup from these players."""
+    return optimal_lineup(players, roster_positions)["projected_total"]
+
+
+def marginal_value(
+    candidate: dict, owned: list[dict], roster_positions: list[str]
+) -> float:
+    """How much this player improves your lineup *over a replacement at his slot*.
+
+    VOR asks "how much better is he than a replacement at his position?" That is
+    the right question for a draft board and the wrong one for a roster, because
+    it never notices you can only start so many of a position. In a one-TE
+    league a second tight end carries a large VOR - he really is far better than
+    the last startable TE league-wide - while improving your lineup by almost
+    nothing, because your TE slot is filled and tight ends rarely win a flex
+    spot. That is how a board recommends TE4 over WR5.
+
+    Recomputing the optimal lineup with and without him answers that directly,
+    with no positional special-casing: the roster shape decides what can be
+    started, so a league where TE *is* flex-eligible gets a different answer
+    for free.
+
+    The subtlety is what to compare against. Comparing to the lineup *without*
+    him measures raw points, not value, and raw points are on a different scale
+    from VOR - so blending the two ranks them nonsensically. An empty DEF slot
+    is the clearest case: the best defence adds his whole ~116-point season to
+    an empty slot, which floats every defence and kicker to the top of the
+    board. But the *choice* is not worth 116 points, because the waiver-wire
+    defence you would otherwise start is worth ~97 of them. The decision is
+    worth the difference.
+
+    So the baseline is the lineup with a replacement-level player at the
+    candidate's position. That puts the result on the same scale as VOR by
+    construction: for an open slot it reduces to roughly his VOR, and for a
+    slot he cannot crack it reduces to zero.
+
+    Replacement level needs no extra plumbing - it is already implied by the
+    row, since vor = points - replacement.
+    """
+    vor = candidate.get("vor")
+    points = candidate.get("points")
+
+    if vor is None or points is None:
+        # No VOR to anchor on; fall back to the raw improvement.
+        baseline = owned
+    else:
+        replacement = {
+            **candidate,
+            "player_id": "__replacement__",
+            "name": "replacement",
+            "points": points - vor,
+        }
+        baseline = [*owned, replacement]
+
+    return starting_value([*owned, candidate], roster_positions) - starting_value(
+        baseline, roster_positions
+    )
+
+
+def _depth_discount(
+    candidate: dict, owned: list[dict], roster_positions: list[str]
+) -> float:
+    """How much a bench player's depth value decays behind those ahead of him.
+
+    Bench value is not proportional to VOR - it is proportional to how likely
+    you are to need him. The first backup at a position is genuinely useful:
+    starters miss time. The fourth is not, because three players have to fall
+    over before he plays.
+
+    Without this, a roster full of tight ends keeps rating the next tight end
+    above a receiver, since a flat share of VOR preserves the very ordering the
+    lineup check was meant to correct.
+    """
+    pos = candidate.get("position")
+    ahead = sum(1 for o in owned if o.get("position") == pos)
+    # Startable slots for this position on a single roster, flex share included.
+    per_team = scoring.starter_counts(roster_positions, 1).get(pos, 0.0)
+    surplus = max(0.0, ahead - per_team)
+    return 1.0 / (1.0 + surplus)
+
+
+def effective_value(
+    candidate: dict, owned: list[dict], roster_positions: list[str]
+) -> dict:
+    """Lineup improvement, floored by what the player is worth as depth.
+
+    Ranking on lineup improvement alone would price every backup at exactly
+    zero, which overcorrects - depth wins seasons. So the score is the better
+    of what he adds to the lineup now and what he is worth behind the players
+    already there, which decays the deeper he sits.
+    """
+    vor = candidate.get("vor") or 0.0
+    marginal = marginal_value(candidate, owned, roster_positions)
+    # max(0, vor) matters: a below-replacement player must not earn a *floor*
+    # from a negative number.
+    discount = _depth_discount(candidate, owned, roster_positions)
+    bench_floor = BENCH_SHARE * max(0.0, vor) * discount
+    score = max(marginal, bench_floor)
+
+    pos = candidate.get("position")
+    ahead = sum(1 for o in owned if o.get("position") == pos)
+
+    if not owned:
+        why = "no roster yet - full value"
+    elif marginal >= bench_floor and marginal > 0:
+        why = f"improves your starting lineup by {marginal:.1f}"
+    elif vor > 0 and discount < 1.0:
+        why = (
+            f"cannot crack your lineup and you already roster {ahead} at {pos} - "
+            f"depth value discounted to {discount:.0%}"
+        )
+    elif vor > 0:
+        why = f"cannot crack your lineup (adds {marginal:.1f}) - valued as depth"
+    else:
+        why = "below replacement at his position"
+
+    return {
+        "effective_value": round(score, 1),
+        "marginal_to_lineup": round(marginal, 1),
+        "bench_floor": round(bench_floor, 1),
+        "depth_discount": round(discount, 2),
+        "vor": round(vor, 1),
+        "why": why,
+    }
+
+
 def _need_multiplier(urgency: str) -> float:
     return {
         "critical": 1.15,
@@ -51,6 +184,24 @@ def _need_multiplier(urgency: str) -> float:
         "adequate": 1.0,
         "surplus": 0.88,
     }.get(urgency, 1.0)
+
+
+def apply_need(vor: float, urgency: str) -> float:
+    """Tilt a value by positional need, without inverting below zero.
+
+    Scaling a signed number by a multiplier does the opposite of what it means
+    once the number goes negative: a 0.88 "penalty" on a VOR of -60 returns
+    -52.8, which *promotes* the player. The old code did exactly that, so a
+    surplus position was penalised above replacement and rewarded below it,
+    while a critical need was rewarded above and punished below. Both backwards.
+
+    The tilt belongs on the upside only. A below-replacement player is not made
+    more attractive by the position being thin, nor less by it being crowded -
+    he is below replacement either way.
+    """
+    if vor <= 0:
+        return vor
+    return vor * _need_multiplier(urgency)
 
 
 def draft_recommendations(
@@ -72,8 +223,11 @@ def draft_recommendations(
 
     scored: list[dict] = []
     for p in available:
-        mult = _need_multiplier(needs.get(p["position"], {}).get("urgency", "adequate"))
-        adjusted = p["vor"] * mult
+        urgency = needs.get(p["position"], {}).get("urgency", "adequate")
+        # Rank on what he adds to *this* roster, not on raw VOR. The need tilt
+        # then breaks ties among players who help a similar amount.
+        fit = effective_value(p, owned, roster_positions)
+        adjusted = apply_need(fit["effective_value"], urgency)
 
         adp = p.get("adp")
         if adp and pick_number:
@@ -84,7 +238,12 @@ def draft_recommendations(
 
         reasons = []
         need_info = needs.get(p["position"], {})
-        if need_info.get("urgency") == "critical":
+        if owned and fit["marginal_to_lineup"] <= 0 and (p.get("vor") or 0) > 0:
+            reasons.append(
+                f"adds nothing to your lineup — you already start "
+                f"{need_info.get('have', 0)} at {p['position']}"
+            )
+        elif need_info.get("urgency") == "critical":
             reasons.append(f"you have no starting {p['position']} yet")
         elif need_info.get("urgency") == "thin":
             reasons.append(f"{p['position']} is still thin ({need_info.get('have')} rostered)")
@@ -109,6 +268,8 @@ def draft_recommendations(
             {
                 **p,
                 "adjusted_value": round(adjusted, 1),
+                "marginal_to_lineup": fit["marginal_to_lineup"],
+                "bench_floor": fit["bench_floor"],
                 "adp_delta": round(adp_delta, 1) if adp_delta is not None else None,
                 "why": "; ".join(reasons) or "best value on the board",
             }

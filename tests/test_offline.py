@@ -397,3 +397,72 @@ def test_racr_undefined_on_non_positive_air_yards():
 def test_opportunity_flags_handle_missing_data():
     assert usage.opportunity_flags(None, "WR")
     assert usage.opportunity_flags({}, "DL")
+
+
+# --- roster-aware value: you can only start so many of a position -----------
+
+ONE_TE_ROSTER = ["QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "BN", "BN", "BN"]
+
+
+def _p(name, pos, pts, vor):
+    return {"player_id": name, "name": name, "position": pos, "points": pts, "vor": vor}
+
+
+def _filled_roster():
+    """Starters all filled, both flex spots taken by a decent RB and WR."""
+    return [
+        _p("QB1", "QB", 300, 50), _p("RB1", "RB", 260, 110),
+        _p("RB2", "RB", 230, 80), _p("WR1", "WR", 250, 95),
+        _p("WR2", "WR", 225, 70), _p("TE1", "TE", 200, 80),
+        _p("RB3", "RB", 210, 60), _p("WR3", "WR", 205, 50),
+    ]
+
+
+def test_backup_te_adds_nothing_to_a_full_lineup():
+    """A second TE cannot start once TE and both flex spots are better filled."""
+    owned = _filled_roster()
+    assert analysis.marginal_value(_p("TE4", "TE", 170, 60), owned, ONE_TE_ROSTER) == 0.0
+
+
+def test_te_who_beats_a_starter_does_add_value():
+    """The lineup check must not blanket-zero every TE - only the unplayable ones."""
+    owned = _filled_roster()
+    elite = _p("TEx", "TE", 260, 130)
+    assert analysis.marginal_value(elite, owned, ONE_TE_ROSTER) > 0
+
+
+def test_hoarded_te_ranks_below_a_receiver_with_less_vor():
+    """The reported bug: naive VOR keeps rating TE4 over WR5 in a 1-TE league."""
+    owned = _filled_roster() + [_p("TEa", "TE", 150, 30), _p("TEb", "TE", 140, 25)]
+    te4 = analysis.effective_value(_p("TE4", "TE", 170, 60), owned, ONE_TE_ROSTER)
+    wr5 = analysis.effective_value(_p("WR5", "WR", 185, 45), owned, ONE_TE_ROSTER)
+    assert te4["vor"] > wr5["vor"], "precondition: raw VOR prefers the TE"
+    assert wr5["effective_value"] > te4["effective_value"]
+
+
+def test_first_backup_at_a_position_keeps_its_value():
+    """Depth is not worthless: starters miss time, so TE2 is not discounted."""
+    owned = _filled_roster()
+    assert analysis.effective_value(
+        _p("TE4", "TE", 170, 60), owned, ONE_TE_ROSTER
+    )["depth_discount"] == 1.0
+
+
+def test_bench_floor_never_rewards_a_below_replacement_player():
+    owned = _filled_roster()
+    assert analysis.effective_value(
+        _p("bad", "WR", 40, -60), owned, ONE_TE_ROSTER
+    )["bench_floor"] == 0.0
+
+
+def test_need_tilt_never_flips_sign_on_negative_value():
+    """Scaling a signed number inverts the intent below zero.
+
+    A 0.88 'penalty' on -60 returns -52.8, which promotes the player. The tilt
+    must apply to the upside only.
+    """
+    for urgency in ("critical", "thin", "adequate", "surplus"):
+        assert analysis.apply_need(-60.0, urgency) == -60.0
+        assert analysis.apply_need(0.0, urgency) == 0.0
+    assert analysis.apply_need(60.0, "critical") > 60.0
+    assert analysis.apply_need(60.0, "surplus") < 60.0
