@@ -161,14 +161,42 @@ def marginal_value(
 # backup you would never play: the true alternative to a second defence is not
 # the 13th-best defence, it is whichever one is free on waivers that week -
 # which is roughly as good. So the surplus is not small, it is zero.
-STREAMABLE_POSITIONS = ("DEF", "K")
+# Positions where the NFL fields exactly one per team, so league-wide supply is
+# fixed at 32 no matter how deep the fantasy league is.
+#
+# This is the property that makes streaming possible, and it is a fact about
+# football rather than about any league's settings.
+ONE_PER_NFL_TEAM = ("QB", "K", "DEF")
 
 
 def roster_cap(position: str | None, roster_positions: list[str]) -> float | None:
-    """Most of this position worth rostering, or None if uncapped."""
-    if position not in STREAMABLE_POSITIONS:
+    """Most of this position worth rostering, or None if uncapped.
+
+    Whether a position is streamable is a property of the *league*, not a fixed
+    list, and hardcoding one gets superflex badly wrong in both directions.
+
+    For the positions the NFL fields one of per team, supply is fixed at 32. A
+    league starting at most one per team therefore leaves 32 - num_teams of them
+    unrostered - twenty startable quarterbacks on waivers in a twelve-team
+    league - so a backup has no value over what is free, and the bye week is
+    streamed. That is why a defence, a kicker and a one-QB league's quarterback
+    all get capped at what you start.
+
+    Start more than one per team and it inverts. Superflex demand roughly
+    doubles, the waiver pool of startable quarterbacks empties, and QB depth
+    becomes one of the most valuable things on the roster - so the cap is
+    lifted rather than merely raised.
+
+    Returning None (uncapped) is the safe default: a cap suppresses picks
+    entirely, so anything this rule is unsure about stays draftable.
+    """
+    if position not in ONE_PER_NFL_TEAM:
         return None
-    return scoring.starter_counts(roster_positions, 1).get(position, 0.0)
+    per_team = scoring.starter_counts(roster_positions, 1).get(position, 0.0)
+    if per_team > 1.0:
+        # Demand exceeds one per team: real scarcity, so depth has real value.
+        return None
+    return per_team
 
 
 def _depth_discount(

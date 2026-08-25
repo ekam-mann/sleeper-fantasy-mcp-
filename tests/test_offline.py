@@ -545,3 +545,44 @@ def test_below_replacement_players_do_not_all_tie_at_zero():
         for pos in ("TE", "WR", "RB")
     }
     assert len(set(scores.values())) > 1, scores
+
+
+SUPERFLEX_ROSTER = [
+    "QB", "RB", "RB", "WR", "WR", "TE", "FLEX", "FLEX", "SUPER_FLEX", "K", "DEF",
+]
+
+
+def test_qb_is_streamable_in_a_one_qb_league():
+    """32 NFL starters against 12 needed leaves 20 startable QBs on waivers."""
+    assert analysis.roster_cap("QB", ONE_TE_ROSTER + ["DEF"]) == 1.0
+
+
+def test_qb_is_not_streamable_in_superflex():
+    """Demand roughly doubles, the waiver pool empties, and depth has value."""
+    assert analysis.roster_cap("QB", SUPERFLEX_ROSTER) is None
+
+
+def test_skill_positions_are_never_capped():
+    for pos in ("RB", "WR", "TE"):
+        assert analysis.roster_cap(pos, SUPERFLEX_ROSTER) is None
+        assert analysis.roster_cap(pos, ONE_TE_ROSTER) is None
+
+
+def test_defence_stays_capped_in_every_league_shape():
+    for rp in (ONE_TE_ROSTER + ["DEF"], SUPERFLEX_ROSTER):
+        assert analysis.roster_cap("DEF", rp) == 1.0
+
+
+def test_second_qb_not_recommended_in_a_one_qb_league():
+    rp = ONE_TE_ROSTER + ["DEF"]
+    owned = _filled_roster()  # already holds a QB
+    avail = [_p("QB2", "QB", 280, 40.0), _p("WRz", "WR", 150, 10.0)]
+    recs = analysis.draft_recommendations(avail, owned, rp, 12, 130)
+    assert all(r["position"] != "QB" for r in recs)
+
+
+def test_second_qb_is_recommended_in_superflex():
+    owned = _filled_roster()
+    avail = [_p("QB2", "QB", 280, 40.0)]
+    recs = analysis.draft_recommendations(avail, owned, SUPERFLEX_ROSTER, 8, 20)
+    assert [r["position"] for r in recs] == ["QB"]
