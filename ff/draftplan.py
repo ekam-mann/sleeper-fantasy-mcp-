@@ -36,14 +36,46 @@ def _normal_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
+# The draft starts at pick 1, so the distribution of where a player goes is
+# truncated there. Nobody can be taken before the first pick.
+FIRST_PICK = 1
+
+
 def availability_probability(adp: float | None, pick: int) -> float | None:
-    """P(player is still on the board when `pick` comes round)."""
+    """P(player is still on the board when `pick` comes round).
+
+    Draft position is modelled as a normal around ADP, **left-truncated at the
+    first pick**. Without the truncation the normal puts mass below pick 1 -
+    which is not a rounding artefact but a physically impossible event, and it
+    is largest exactly where it does the most damage. A player with an ADP of
+    1.0 has half his distribution below pick 1, so the untruncated form
+    reported him as 50% likely to still be there at the very first pick of the
+    draft, when the true answer is certainty.
+
+    Conditioning on the draft actually starting gives:
+
+        P(X >= pick | X >= 1) = S(pick) / S(1)
+
+    where S is the normal survival function. That is 1.0 at pick 1 by
+    construction, still decreasing in `pick`, and still bounded by [0, 1].
+    """
     if adp is None:
         # No ADP usually means deep sleeper - effectively always available.
         return 0.97
+
+    if pick <= FIRST_PICK:
+        # Nothing can have been drafted yet.
+        return 1.0
+
     sd = _spread(adp)
-    # He survives if his realised draft slot lands at or beyond this pick.
-    return 1.0 - _normal_cdf((pick - adp) / sd)
+    survival_at_pick = 1.0 - _normal_cdf((pick - adp) / sd)
+    # Renormalise over the region the draft can actually occupy.
+    survival_at_first = 1.0 - _normal_cdf((FIRST_PICK - adp) / sd)
+    if survival_at_first <= 0.0:
+        # Unreachable for any ADP >= 1 (the denominator is at least 0.5 there),
+        # but guard rather than divide by zero on absurd input.
+        return 0.0
+    return min(1.0, survival_at_pick / survival_at_first)
 
 
 def picks_for_slot(

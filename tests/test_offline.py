@@ -97,6 +97,31 @@ def test_auction_has_no_pick_slots():
     assert draftplan.picks_for_slot(3, 10, 5, "auction") == []
 
 
+def test_first_pick_is_always_certain():
+    """Nobody can be drafted before pick 1, whatever their ADP.
+
+    The distribution of draft position is left-truncated at the first pick.
+    Untruncated, a normal around an ADP of 1.0 puts half its mass below pick 1
+    and reported that player as only 50% likely to survive to the very first
+    pick of the draft.
+    """
+    for adp in (1.0, 1.5, 2.0, 5.0, 20.0, 100.0, 300.0):
+        assert draftplan.availability_probability(adp, 1) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("adp", [1.0, 3.0, 12.0, 50.0, 150.0])
+def test_availability_is_bounded_and_monotonic(adp):
+    probs = [draftplan.availability_probability(adp, p) for p in range(1, 200)]
+    assert all(0.0 <= x <= 1.0 for x in probs)
+    assert all(a >= b - 1e-12 for a, b in zip(probs, probs[1:]))
+
+
+def test_no_probability_mass_before_the_draft_starts():
+    """A pick at or before the first is certain, never a fraction."""
+    for pick in (0, 1):
+        assert draftplan.availability_probability(1.0, pick) == pytest.approx(1.0)
+
+
 def test_availability_falls_with_later_picks():
     probs = [draftplan.availability_probability(20.0, p) for p in (5, 15, 25, 40)]
     assert all(a >= b for a, b in zip(probs, probs[1:]))
