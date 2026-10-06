@@ -1,5 +1,7 @@
 # sleeper-fantasy-mcp
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/ekam-mann/sleeper-fantasy-mcp-?variant=verified)](https://m8ven.ai/mcp/ekam-mann/sleeper-fantasy-mcp-?s=readme)
+
 An MCP server that turns [Sleeper](https://sleeper.app) league data into
 league-accurate fantasy football advice. Every projection is scored through
 *your* league's actual scoring settings, and value is expressed as VOR against
